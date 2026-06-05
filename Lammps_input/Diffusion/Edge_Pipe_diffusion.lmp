@@ -1,0 +1,250 @@
+# ============================================================
+# Edge dislocation pipe diffusion in alpha-Cu64Zn36
+#
+# type 1 = Cu
+# type 2 = Zn
+#
+# Boundary condition:
+#   x,y : non-periodic finite cylinder
+#   z   : periodic along dislocation line
+#
+# Workflow:
+#   1. Minimize full cylinder without fixed shell
+#   2. Heat/equilibrate at target temperature using NPT along z
+#   3. Fix outer 5 A shell
+#   4. Equilibrate and run production
+# ============================================================
+
+log             log_edge_873K.lammps
+
+#processors      4 4 24
+
+units           metal
+dimension       3
+atom_style      atomic
+boundary        m m p
+
+# ------------------------------------------------------------
+# Parameters
+# ------------------------------------------------------------
+variable        TEMP equal 873.0  # change the temperature as required
+variable        dt equal 0.002
+variable        TAG string edge_873K
+
+variable        Rfreeze equal 70.0
+variable        Rcore   equal 25.0
+
+# ------------------------------------------------------------
+# Structure and potential
+# ------------------------------------------------------------
+read_data       CuZn36_Edge_new.data.lmp
+
+mass            1 63.546
+mass            2 65.38
+
+pair_style      eam/alloy
+pair_coeff      * * CuZn.eam.alloy Cu Zn
+
+neighbor        2.0 bin
+neigh_modify    delay 0 every 1 check yes
+timestep        ${dt}
+
+group           copper type 1
+group           zinc   type 2
+
+print           "Total atoms = $(count(all))"
+print           "Cu atoms    = $(count(copper))"
+print           "Zn atoms    = $(count(zinc))"
+
+# ------------------------------------------------------------
+# Pipe and dislocation centers
+# ------------------------------------------------------------
+variable        xpipe equal "xlo + 0.500*lx"
+variable        ypipe equal "ylo + 0.500*ly"
+
+variable        xdis  equal "xlo + 0.501*lx"
+variable        ydis  equal "ylo + 0.501*ly"
+
+variable        zcorelo equal "zlo + 8.0"
+variable        zcorehi equal "zhi - 8.0"
+
+# ------------------------------------------------------------
+# Initial minimization 
+# ------------------------------------------------------------
+thermo          100
+thermo_style    custom step pe etotal press pxx pyy pzz lx ly lz atoms
+thermo_modify   lost error flush yes
+
+min_style       cg
+min_modify      line quadratic
+minimize        1.0e-10 1.0e-10 90000 180000
+
+run             0
+write_data      minimized_edge_873K.data
+reset_timestep  0
+
+# ------------------------------------------------------------
+# Thermal equilibration
+# x/y are free surfaces; only z is barostatted
+# ------------------------------------------------------------
+velocity        all create 10.0 972871 mom yes rot no dist gaussian
+velocity        all zero linear
+
+fix             EQ1 all npt temp 10.0 ${TEMP} 0.1 z 0.0 0.0 1.0
+
+thermo          1000
+thermo_style    custom step temp pe etotal press pxx pyy pzz lx ly lz
+
+dump            heat all custom 10000 dump_heating_${TAG}.lammpstrj id type x y z vx vy vz
+dump_modify     heat sort id flush yes
+
+run             250000        # 500 ps 
+
+unfix           EQ1
+undump          heat
+
+write_data      equilibrated_unfixed_edge_873K.data
+reset_timestep  0
+
+# ------------------------------------------------------------
+# Define mobile region and fixed outer shell after equilibration
+# ------------------------------------------------------------
+region          inner_mobile cylinder z v_xpipe v_ypipe ${Rfreeze} EDGE EDGE units box
+
+group           mobile region inner_mobile
+group           frozen subtract all mobile
+
+fix             HOLD frozen setforce 0.0 0.0 0.0
+velocity        frozen set 0.0 0.0 0.0
+
+group           mobile_Cu intersect mobile copper
+group           mobile_Zn intersect mobile zinc
+
+print           "Mobile atoms = $(count(mobile))"
+print           "Frozen atoms = $(count(frozen))"
+print           "Mobile Cu    = $(count(mobile_Cu))"
+print           "Mobile Zn    = $(count(mobile_Zn))"
+
+# Optional vacancy deletion for vacancy-assisted case:
+# group         vacatom id 107092   #( seleted from inner core)
+# delete_atoms group vacatom compress no
+
+# ------------------------------------------------------------
+# Minimization with fixed outer shell
+# ------------------------------------------------------------
+min_style       cg
+min_modify      line quadratic
+minimize        1.0e-8 1.0e-6 90000 180000
+
+run             0
+write_data      minimized_edge_873K_afterfix.data
+reset_timestep  0
+
+# ------------------------------------------------------------
+# Core region for diffusion analysis
+# ------------------------------------------------------------
+region          rg_core cylinder z v_xdis v_ydis ${Rcore} $(v_zcorelo) $(v_zcorehi) units box
+
+group           core_all region rg_core
+group           core_Cu intersect core_all mobile_Cu
+group           core_Zn intersect core_all mobile_Zn
+
+print           "Core atoms = $(count(core_all))" file shell_counts_edge_873K.txt
+print           "Core Cu    = $(count(core_Cu))" append shell_counts_edge_873K.txt
+print           "Core Zn    = $(count(core_Zn))" append shell_counts_edge_873K.txt
+
+write_dump      core_Zn custom core_Zn_ids_after_min_${TAG}.txt id type x y z
+
+# ------------------------------------------------------------
+# Equilibration with fixed outer shell
+# ------------------------------------------------------------
+compute         Tmobile mobile temp
+thermo_modify   temp Tmobile lost error flush yes
+
+velocity        mobile zero linear
+
+fix             EQ2 mobile nvt temp ${TEMP} ${TEMP} 0.1
+fix_modify      EQ2 temp Tmobile
+
+thermo          1000
+thermo_style    custom step c_Tmobile pe etotal press pxx pyy pzz lx ly lz
+
+dump            eq all custom 10000 dump_eq_fixed_${TAG}.lammpstrj id type x y z vx vy vz
+dump_modify     eq sort id flush yes
+
+run             100000        # 200 ps 
+
+unfix           EQ2
+undump          eq
+
+write_data      equilibrated_fixed_edge_873K.data
+reset_timestep  0
+
+# ------------------------------------------------------------
+# MSD setup
+# ------------------------------------------------------------
+#set             group all image 0 0 0
+
+compute         msd_mobile_Zn mobile_Zn msd com no
+compute         msd_core_Zn   core_Zn   msd com no
+
+fix             FMSD all ave/time 1000 10 10000  &
+                c_msd_mobile_Zn[1] c_msd_mobile_Zn[2] c_msd_mobile_Zn[3] c_msd_mobile_Zn[4] &
+                c_msd_core_Zn[1]   c_msd_core_Zn[2]   c_msd_core_Zn[3]   c_msd_core_Zn[4]   &
+                file msd_edge_873K.txt
+
+# ------------------------------------------------------------
+# Production run
+# ------------------------------------------------------------
+fix             PROD mobile nvt temp ${TEMP} ${TEMP} 0.1
+fix_modify      PROD temp Tmobile
+
+dump            prod all custom 10000 dump_prod_edge_873K.*.lammpstrj id type x y z vx vy vz ix iy iz
+dump_modify     prod sort id flush yes
+
+thermo          1000
+thermo_style    custom step c_Tmobile pe etotal press pxx pyy pzz c_msd_core_Zn[4]
+thermo_modify   temp Tmobile lost error flush yes
+
+run             250000
+write_restart   restart_edge_873K_1.restart
+run             250000
+write_restart   restart_edge_873K_2.restart
+run             250000
+write_restart   restart_edge_873K_3.restart
+run             250000
+write_restart   restart_edge_873K_4.restart
+run             250000
+write_restart   restart_edge_873K_5.restart
+run             250000
+write_restart   restart_edge_873K_6.restart
+run             250000
+write_restart   restart_edge_873K_7.restart
+run             250000
+write_restart   restart_edge_873K_8.restart
+run             250000
+write_restart   restart_edge_873K_9.restart
+run             250000
+write_restart   restart_edge_873K_10.restart
+run             250000
+write_restart   restart_edge_873K_11.restart
+run             250000
+write_restart   restart_edge_873K_12.restart
+run             250000
+write_restart   restart_edge_873K_13.restart
+run             250000
+write_restart   restart_edge_873K_14.restart
+run             250000
+write_restart   restart_edge_873K_15.restart
+run             250000
+write_restart   restart_edge_873K_16.restart
+run             250000
+write_restart   restart_edge_873K_17.restart
+run             250000
+write_restart   restart_edge_873K_18.restart
+run             250000
+write_restart   restart_edge_873K_19.restart
+run             250000
+write_restart   restart_edge_873K_20.restart
+
+print           "DONE edge 873K"

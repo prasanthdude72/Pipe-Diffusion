@@ -1,0 +1,110 @@
+# ============================================================
+# Zn vacancy-cell energy calculation in screw-dislocation core
+#
+# type 1 = Zn
+# type 2 = Cu
+#
+# Boundary condition:
+#   x,y : non-periodic finite cylinder
+#   z   : periodic along dislocation line
+#
+#
+# Rcore = 25 A
+# ============================================================
+
+log             none
+
+units           metal
+dimension       3
+atom_style      atomic
+boundary        m m p
+
+# ------------------------------------------------------------
+# Settings
+# ------------------------------------------------------------
+variable        Rcore equal 25.0
+
+# ------------------------------------------------------------
+# Read unfixed relaxed no-vacancy reference structure
+# This must be the same reference used for E_ref
+# ------------------------------------------------------------
+read_data       minimized_screw_873K.data
+
+# ------------------------------------------------------------
+# Species and potential
+# ------------------------------------------------------------
+mass            1 65.38
+mass            2 63.546
+
+pair_style      eam/alloy
+pair_coeff      * * CuZn.eam.alloy Zn Cu
+
+neighbor        2.0 bin
+neigh_modify    delay 0 every 1 check yes
+
+group           zinc   type 1
+group           copper type 2
+
+# ------------------------------------------------------------
+# Dislocation/core center
+# ------------------------------------------------------------
+variable        xdis equal "xlo + 0.501*lx"
+variable        ydis equal "ylo + 0.501*ly"
+
+variable        zcorelo equal "zlo + 8.0"
+variable        zcorehi equal "zhi - 8.0"
+
+# ------------------------------------------------------------
+# Core region: R <= 25 A, excluding 8 A from both z ends
+# ------------------------------------------------------------
+region          core_region cylinder z v_xdis v_ydis ${Rcore} $(v_zcorelo) $(v_zcorehi) units box
+
+group           core_all region core_region
+group           core_Cu intersect core_all copper
+group           core_Zn intersect core_all zinc
+
+print           "Core all atoms before deletion = $(count(core_all))"
+print           "Core Cu atoms before deletion  = $(count(core_Cu))"
+print           "Core Zn atoms before deletion  = $(count(core_Zn))"
+
+# ------------------------------------------------------------
+# Energy compute
+# ------------------------------------------------------------
+compute         eng all pe/atom
+compute         E_total all reduce sum c_eng
+
+# ------------------------------------------------------------
+# Delete target Zn atom
+# ------------------------------------------------------------
+group           target_atom id ${ATOMID}
+
+print           "Deleting atom ID = ${ATOMID}"
+
+delete_atoms    group target_atom compress no
+
+print           "Total atoms after deletion = $(count(all))"
+
+# ------------------------------------------------------------
+# Minimize vacancy-containing structure
+# ------------------------------------------------------------
+reset_timestep  0
+
+thermo          100
+thermo_style    custom step pe etotal press pxx pyy pzz atoms
+thermo_modify   lost error flush yes
+
+min_style       cg
+min_modify      line quadratic
+minimize        1.0e-8 1.0e-6 90000 180000
+
+run             0
+
+# ------------------------------------------------------------
+# Save relaxed vacancy-cell energy
+# ------------------------------------------------------------
+variable        E_Vac_Cell equal c_E_total
+
+print           "${ATOMID} ${E_Vac_Cell}" append Zn_vacancy_energies_Screw_core25_unfixed.txt
+
+print           "DONE vacancy energy for atom ${ATOMID}"
+
